@@ -1,0 +1,141 @@
+# Computes the semantic version based on Git history, merge requests, and breaking changes.
+
+spec:
+  inputs:
+    project_name:
+      description: "The project name to prefix branches and tags with, if using a multi-project setup"
+      type: string
+      default: ""
+
+    base_version:
+      description: "The base version to use if no tags are found in the repository (e.g., '0.1.0')"
+      type: string
+      default: "0.1.0"
+
+    skip_breaking_changes_from:
+      description: "List of authors whose breaking changes should be ignored, comma or line-separated"
+      type: string
+      default: ""
+
+---
+
+.compute-semver:
+  image: debian:stable-slim
+
+  before_script:
+    - apt-get update && apt-get install -y curl git jq
+
+  script:
+    # -------------------------------------------------------------------------
+    # Step 1: Fetch Full Git History
+    # -------------------------------------------------------------------------
+    - |
+      git fetch --all --tags --quiet
+
+    # -------------------------------------------------------------------------
+    # Step 2: Determine Current Branch Name and Source
+    # -------------------------------------------------------------------------
+    - |
+      if [[ "${CI_PIPELINE_SOURCE}" == "merge_request_event" || -n "${CI_MERGE_REQUEST_IID}" ]]; then
+          __branch="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+          __branch_source="mr"
+      elif [[ "${CI_MERGE_REQUEST_EVENT_TYPE}" == "merge_train" ]]; then
+          __branch="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+          __branch_source="merge_train"
+      elif [[ -n "${CI_COMMIT_TAG}" ]]; then
+          __version="${CI_COMMIT_TAG#v}"
+          __version="${__version%%-*}"
+          __version_patch="${__version##*.}"
+
+          if [[ "${__version_patch}" == "0" ]]; then
+              __branch="release/v${__version}"
+          else
+              __branch="hotfix/v${__version}"
+          fi
+          __branch_source="tag"
+      else
+          __branch="${CI_COMMIT_REF_NAME}"
+          __branch_source="normal"
+      fi
+
+      # Fallback Method: If CI variables were inconclusive, inspect Git history directly
+      if [[ -z "${__branch}" ]]; then
+          # In detached HEAD state, find all branches containing the current commit
+          __branches="$(git branch --contains HEAD --format='%(refname:short)' | grep -v 'HEAD detached' || :)"
+
+          # Prioritize specific branches if multiple candidates exist
+          __branch="$(
+              echo "${__branches}" | grep -E '^release/' ||
+              echo "${__branches}" | grep -E '^hotfix/' ||
+              echo "${__branches}" | grep -E '^develop$'
+          )"
+      fi
+
+      __branch="${__branch:-unknown}"
+
+    # -------------------------------------------------------------------------
+    # Step 3: Build SemVer Options
+    # -------------------------------------------------------------------------
+    - |
+      __options="--branch ${__branch}"
+
+      if [[ -n "$[[ inputs.project_name ]]" ]]; then
+          __options+=" --project-name $[[ inputs.project_name ]]"
+      fi
+
+      if [[ -n "$[[ inputs.base_version ]]" ]]; then
+          __options+=" --base-version $[[ inputs.base_version ]]"
+      fi
+
+      # If the trigger is a merge request, switch to the 'request-number' versioning strategy
+      if [[ "${__branch_source}" == "mr" || "${__branch_source}" == "merge_train" ]]; then
+          __options+=" --versioning-strategy request-number"
+          __options+=" --request-number $CI_MERGE_REQUEST_IID"
+          __options+=" --request-type mr"
+      fi
+
+      # Add options to skip breaking changes from specified authors, if provided
+      if [[ -n "$[[ inputs.skip_breaking_changes_from ]]" ]]; then
+          __authors="$(echo "$[[ inputs.skip_breaking_changes_from ]]" | tr ',\r\n' ' ')"
+          for __author in ${__authors}; do
+              __options+=" --skip-breaking-changes-from ${__author}"
+          done
+      fi
+
+      # Always request JSON output for parsing
+      __options+=" --json"
+
+    # -------------------------------------------------------------------------
+    # Step 4: Download SemVer Script
+    # -------------------------------------------------------------------------
+    - |
+      curl -sSL -o "/tmp/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+      chmod +x "/tmp/semver.sh"
+
+    # -------------------------------------------------------------------------
+    # Step 5: Execute SemVer Command
+    # -------------------------------------------------------------------------
+    - |
+      # Construct the SemVer command to execute
+      __semver_cmd="/tmp/semver.sh show-version"
+
+      # Execute the SemVer command and capture the JSON output
+      __json_output="$(${__semver_cmd} ${__options})"
+
+    # -------------------------------------------------------------------------
+    # Step 6: Set Version Outputs
+    # -------------------------------------------------------------------------
+    - |
+      {
+          echo "SEMVER_VERSION=$(echo "${__json_output}" | jq -r '.semver')"
+          echo "SEMVER_MAJOR=$(echo "${__json_output}" | jq -r '.components.major')"
+          echo "SEMVER_MINOR=$(echo "${__json_output}" | jq -r '.components.minor')"
+          echo "SEMVER_PATCH=$(echo "${__json_output}" | jq -r '.components.patch')"
+          echo "SEMVER_PRE_RELEASE=$(echo "${__json_output}" | jq -r '.components.pre_release')"
+          echo "SEMVER_RELEASE_TYPE=$(echo "${__json_output}" | jq -r '.components.release_type')"
+          echo "SEMVER_INCREMENT=$(echo "${__json_output}" | jq -r '.components.increment')"
+      } >>"semver.env"
+
+  artifacts:
+    reports:
+      dotenv: semver.env

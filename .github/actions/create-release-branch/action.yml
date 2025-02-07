@@ -1,0 +1,122 @@
+name: "Create Release Branch"
+description: |
+  Calculates and creates a new release branch using semver.sh.
+
+inputs:
+  github_token:
+    description: "The GitHub token used to push the new branch and tag"
+    required: true
+
+  project_name:
+    description: "The project name to prefix branches and tags with, if using a multi-project setup"
+    required: false
+    default: ""
+
+  base_version:
+    description: "The base version to use if no tags are found in the repository (e.g., '0.1.0')"
+    required: false
+    default: "0.1.0"
+
+  skip_breaking_changes_from:
+    description: "List of authors whose breaking changes should be ignored, comma or line-separated"
+    required: false
+    default: ""
+
+outputs:
+  branch:
+    description: "The name of the newly created release branch"
+    value: "${{ steps.set_outputs.outputs.branch }}"
+
+  tag:
+    description: "The name of the newly created release start marker tag"
+    value: "${{ steps.set_outputs.outputs.tag }}"
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: "Configure Git for Publishing"
+      shell: "bash"
+      run: |
+        # step: Configure Git for Publishing
+
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git remote set-url origin "https://x-access-token:${{ inputs.github_token }}@github.com/${{ github.repository }}"
+
+    - name: "Build SemVer Options"
+      id: "build_semver_options"
+      shell: "bash"
+      run: |
+        # step: Build SemVer Options
+
+        __options=""
+
+        if [[ -n "${{ inputs.project_name }}" ]]; then
+          __options+=",--project-name ${{ inputs.project_name }}"
+        fi
+
+        if [[ -n "${{ inputs.base_version }}" ]]; then
+          __options+=",--base-version ${{ inputs.base_version }}"
+        fi
+
+        # Add options to skip breaking changes from specified authors, if provided
+        if [[ -n "${{ inputs.skip_breaking_changes_from }}" ]]; then
+            __authors="$(echo "${{ inputs.skip_breaking_changes_from }}" | tr ',\r\n' ' ')"
+            for __author in ${__authors}; do
+                __options+=",--skip-breaking-changes-from ${__author}"
+            done
+        fi
+
+        # Always request JSON output for parsing
+        __options+=",--json"
+
+        {
+            echo "options=${__options}"
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Download SemVer Script"
+      shell: "bash"
+      run: |
+        # step: Download SemVer Script
+
+        curl -sSL -o "${{ runner.temp }}/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+        chmod +x "${{ runner.temp }}/semver.sh"
+
+    - name: "Execute SemVer Command"
+      id: "execute_semver_command"
+      shell: "bash"
+      run: |
+        # step: Execute SemVer Command
+
+        # Construct the SemVer command to execute
+        __semver_cmd="${{ runner.temp }}/semver.sh create-release-branch"
+
+        # Convert the comma-separated options into a space-separated list and append them to the command
+        __options="$(echo "${{ steps.build_semver_options.outputs.options }}" | tr ',\r\n' ' ')"
+
+        for __option in ${__options}; do
+            __semver_cmd+=" ${__option}"
+        done
+
+        # Execute the SemVer command and capture the JSON output
+        __output="$(${__semver_cmd})"
+
+        {
+            echo 'output<<EOF'
+            echo "${__output}"
+            echo 'EOF'
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Set Outputs"
+      id: "set_outputs"
+      shell: "bash"
+      run: |
+        # step: Set Outputs
+
+        __json_output='${{ steps.execute_semver_command.outputs.output }}'
+
+        {
+            echo "branch=$(echo "${__json_output}" | jq -r '.branch')"
+            echo "tag=$(echo "${__json_output}" | jq -r '.tag')"
+        } >>"${GITHUB_OUTPUT}"

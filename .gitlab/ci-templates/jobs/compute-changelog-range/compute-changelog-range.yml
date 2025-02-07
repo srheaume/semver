@@ -1,0 +1,110 @@
+# Computes the 'from' and 'to' Git references for generating a changelog.
+
+spec:
+  inputs:
+    project_name:
+      description: "The project name to prefix branches and tags with, if using a multi-project setup"
+      type: string
+      default: ""
+
+    bootstrap_ref:
+      description: "For legacy projects, a commit SHA or tag to use as the starting point for the first release"
+      type: string
+      default: ""
+
+---
+
+.compute-changelog-range:
+  image: debian:stable-slim
+
+  before_script:
+    - apt-get update && apt-get install -y curl git jq
+
+  script:
+    # -------------------------------------------------------------------------
+    # Step 1: Fetch Full Git History
+    # -------------------------------------------------------------------------
+    - |
+      git fetch --all --tags --quiet
+
+    # -------------------------------------------------------------------------
+    # Step 2: Determine Current Branch Name and Source
+    # -------------------------------------------------------------------------
+    - |
+      if [[ "${CI_PIPELINE_SOURCE}" == "merge_request_event" || "${CI_PIPELINE_SOURCE}" == "merge_train" ]]; then
+          __branch="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+      elif [[ -n "${CI_COMMIT_TAG}" ]]; then
+          __version="${CI_COMMIT_TAG#v}"
+          __version="${__version%%-*}"
+          __version_patch="${__version##*.}"
+
+          if [[ "${__version_patch}" == "0" ]]; then
+              __branch="release/v${__version}"
+          else
+              __branch="hotfix/v${__version}"
+          fi
+      else
+          __branch="${CI_COMMIT_REF_NAME}"
+      fi
+
+      # Fallback Method: If CI variables were inconclusive, inspect Git history directly
+      if [[ -z "${__branch}" ]]; then
+          # In detached HEAD state, find all branches containing the current commit
+          __branches="$(git branch --contains HEAD --format='%(refname:short)' | grep -v 'HEAD detached' || :)"
+
+          # Prioritize specific branches if multiple candidates exist
+          __branch="$(
+              echo "${__branches}" | grep -E '^release/' ||
+              echo "${__branches}" | grep -E '^hotfix/' ||
+              echo "${__branches}" | grep -E '^develop$'
+          )"
+      fi
+
+      __branch="${__branch:-unknown}"
+
+    # -------------------------------------------------------------------------
+    # Step 3: Build SemVer Options
+    # -------------------------------------------------------------------------
+    - |
+      __options="--branch ${__branch}"
+
+      if [[ -n "$[[ inputs.project_name ]]" ]]; then
+          __options+=" --project-name $[[ inputs.project_name ]]"
+      fi
+
+      if [[ -n "$[[ inputs.bootstrap_ref ]]" ]]; then
+          __options+=" --bootstrap-ref $[[ inputs.bootstrap_ref ]]"
+      fi
+
+      # Always request JSON output for parsing
+      __options+=" --json"
+
+    # -------------------------------------------------------------------------
+    # Step 4: Download SemVer Script
+    # -------------------------------------------------------------------------
+    - |
+      curl -sSL -o "/tmp/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+      chmod +x "/tmp/semver.sh"
+
+    # -------------------------------------------------------------------------
+    # Step 5: Execute SemVer Command
+    # -------------------------------------------------------------------------
+    - |
+      # Construct the SemVer command to execute
+      __semver_cmd="/tmp/semver.sh show-changelog-range"
+
+      # Execute the SemVer command and capture the JSON output
+      __json_output="$(${__semver_cmd} ${__options})"
+
+    # -------------------------------------------------------------------------
+    # Step 6: Set Outputs
+    # -------------------------------------------------------------------------
+    - |
+      {
+          echo "SEMVER_CHANGELOG_FROM=$(echo "${__json_output}" | jq -r '.from')"
+          echo "SEMVER_CHANGELOG_TO=$(echo "${__json_output}" | jq -r '.to')"
+      } >>"semver.env"
+
+  artifacts:
+    reports:
+      dotenv: semver.env

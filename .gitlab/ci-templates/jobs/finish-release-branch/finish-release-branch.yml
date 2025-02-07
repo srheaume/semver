@@ -1,0 +1,83 @@
+# Finalizes a release branch by creating and pushing its stable tag.
+
+spec:
+  inputs:
+    branch:
+      description: "The name of the release branch to finalize (e.g., release/v1.2.0)"
+      type: string
+
+    release_type:
+      description: "The type of release for the version tag: 'stable', 'ga', or 'la'"
+      type: string
+      default: "stable"
+
+    project_name:
+      description: "The project name to prefix branches and tags with, if using a multi-project setup"
+      type: string
+      default: ""
+
+---
+
+.finish-release-branch:
+  image: debian:stable-slim
+
+  before_script:
+    - apt-get update && apt-get install -y bash curl git jq
+
+  script:
+    # -------------------------------------------------------------------------
+    # Step 1: Configure Git for Publishing
+    # -------------------------------------------------------------------------
+    - |
+
+      git config --global user.name "gitlab-ci[bot]"
+      git config --global user.email "gitlab-ci[bot]@gitlab.com"
+      git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+
+      git fetch --all --tags --quiet
+
+    # -------------------------------------------------------------------------
+    # Step 2: Build SemVer Options
+    # -------------------------------------------------------------------------
+    - |
+      __options="--branch $[[ inputs.branch ]]"
+
+      if [[ -n "$[[ inputs.release_type ]]" ]]; then
+          __options+=" --release-type $[[ inputs.release_type ]]"
+      fi
+
+      if [[ -n "$[[ inputs.project_name ]]" ]]; then
+          __options+=" --project-name $[[ inputs.project_name ]]"
+      fi
+
+      # Always request JSON output for parsing
+      __options+=" --json"
+
+    # -------------------------------------------------------------------------
+    # Step 3: Download SemVer Script
+    # -------------------------------------------------------------------------
+    - |
+      curl -sSL -o "/tmp/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+      chmod +x "/tmp/semver.sh"
+
+    # -------------------------------------------------------------------------
+    # Step 4: Execute SemVer Command
+    # -------------------------------------------------------------------------
+    - |
+      # Construct the SemVer command to execute
+      __semver_cmd="/tmp/semver.sh finish-release-branch"
+
+      # Execute the SemVer command and capture the JSON output
+      __json_output="$(${__semver_cmd} ${__options})"
+
+    # -------------------------------------------------------------------------
+    # Step 5: Set Outputs
+    # -------------------------------------------------------------------------
+    - |
+      {
+          echo "SEMVER_RELEASE_STABLE_TAG=$(echo "${__json_output}" | jq -r '.tag')"
+      } >>"semver.env"
+
+  artifacts:
+    reports:
+      dotenv: semver.env

@@ -1,0 +1,108 @@
+name: "Finish Release Branch"
+description: |
+  Finalizes a release branch by creating and pushing its stable tag.
+
+inputs:
+  github_token:
+    description: "The GitHub token used to push the new tag"
+    required: true
+
+  branch:
+    description: "The name of the release branch to finalize (e.g., release/v1.2.0)"
+    required: true
+
+  release_type:
+    description: "The type of release for the version tag: 'stable', 'ga', or 'la'"
+    required: false
+    default: "stable"
+
+  project_name:
+    description: "The project name to prefix branches and tags with, if using a multi-project setup"
+    required: false
+    default: ""
+
+outputs:
+  tag:
+    description: "The name of the newly created stable tag"
+    value: "${{ steps.finish_branch.outputs.tag }}"
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: "Configure Git for Publishing"
+      shell: "bash"
+      run: |
+        # step: Configure Git for Publishing
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git remote set-url origin "https://x-access-token:${{ inputs.github_token }}@github.com/${{ github.repository }}"
+
+    - name: "Build SemVer Options"
+      id: "build_semver_options"
+      shell: "bash"
+      run: |
+        # step: Build SemVer Options
+
+        __options="--branch ${{ inputs.branch }}"
+
+        if [[ -n "${{ inputs.release_type }}" ]]; then
+          __options+=",--release-type ${{ inputs.release_type }}"
+        fi
+
+        if [[ -n "${{ inputs.project_name }}" ]]; then
+          __options+=",--project-name ${{ inputs.project_name }}"
+        fi
+
+        # Always request JSON output for parsing
+        __options+=",--json"
+
+        {
+            echo "options=${__options}"
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Download SemVer Script"
+      shell: "bash"
+      run: |
+        # step: Download SemVer Script
+
+        curl -sSL -o "${{ runner.temp }}/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+        chmod +x "${{ runner.temp }}/semver.sh"
+
+    - name: "Execute SemVer Command"
+      id: "execute_semver_command"
+      shell: "bash"
+      run: |
+        # step: Execute SemVer Command
+
+        # Construct the SemVer command to execute
+        __semver_cmd="${{ runner.temp }}/semver.sh finish-release-branch"
+
+        # Convert the comma-separated options into a space-separated list and append them to the command
+        __options="$(echo "${{ steps.build_semver_options.outputs.options }}" | tr ',\r\n' ' ')"
+
+        for __option in ${__options}; do
+            __semver_cmd+=" ${__option}"
+        done
+
+        # Execute the SemVer command and capture the JSON output
+        __output="$(${__semver_cmd})"
+
+        {
+            echo 'output<<EOF'
+            echo "${__output}"
+            echo 'EOF'
+        } >>"${GITHUB_OUTPUT}"
+
+    - name: "Set Outputs"
+      id: "set_outputs"
+      shell: "bash"
+      run: |
+        # step: Set Outputs
+
+        __json_output='${{ steps.execute_semver_command.outputs.output }}'
+
+        {
+            echo "tag=$(echo "${__json_output}" | jq -r '.tag')"
+        } >>"${GITHUB_OUTPUT}"

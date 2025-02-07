@@ -1,0 +1,92 @@
+# Calculates and creates a new release branch using semver.sh.
+
+spec:
+  inputs:
+    project_name:
+      description: "The project name to prefix branches and tags with, if using a multi-project setup"
+      type: string
+      default: ""
+
+    base_version:
+      description: "The base version to use if no tags are found in the repository (e.g., '0.1.0')"
+      type: string
+      default: "0.1.0"
+
+    skip_breaking_changes_from:
+      description: "List of authors whose breaking changes should be ignored, comma or line-separated"
+      type: string
+      default: ""
+
+---
+
+.create-release-branch:
+  image: debian:stable-slim
+
+  before_script:
+    - apt-get update && apt-get install -y curl git jq
+
+  script:
+    # -------------------------------------------------------------------------
+    # Step 1: Configure Git for Publishing
+    # -------------------------------------------------------------------------
+    - |
+      git config --global user.name "gitlab-ci[bot]"
+      git config --global user.email "gitlab-ci[bot]@gitlab.com"
+      git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+
+      git fetch --all --tags --quiet
+
+    # -------------------------------------------------------------------------
+    # Step 2: Build SemVer Options
+    # -------------------------------------------------------------------------
+    - |
+      __options=""
+
+      if [[ -n "$[[ inputs.project_name ]]" ]]; then
+          __options+=" --project-name $[[ inputs.project_name ]]"
+      fi
+
+      if [[ -n "$[[ inputs.base_version ]]" ]]; then
+          __options+=" --base-version $[[ inputs.base_version ]]"
+      fi
+
+      # Add options to skip breaking changes from specified authors, if provided
+      if [[ -n "$[[ inputs.skip_breaking_changes_from ]]" ]]; then
+          __authors="$(echo "$[[ inputs.skip_breaking_changes_from ]]" | tr ',\r\n' ' ')"
+          for __author in ${__authors}; do
+              __options+=" --skip-breaking-changes-from ${__author}"
+          done
+      fi
+
+      # Always request JSON output for parsing
+      __options+=" --json"
+
+    # -------------------------------------------------------------------------
+    # Step 3: Download SemVer Script
+    # -------------------------------------------------------------------------
+    - |
+      curl -sSL -o "/tmp/semver.sh" "https://raw.githubusercontent.com/srheaume/semver/refs/tags/v0.1.0-stable/semver.sh"
+      chmod +x "/tmp/semver.sh"
+
+    # -------------------------------------------------------------------------
+    # Step 4: Execute SemVer Command
+    # -------------------------------------------------------------------------
+    - |
+      # Construct the SemVer command to execute
+      __semver_cmd="/tmp/semver.sh create-release-branch"
+
+      # Execute the SemVer command and capture the JSON output
+      __json_output="$(${__semver_cmd} ${__options})"
+
+    # -------------------------------------------------------------------------
+    # Step 5: Set Outputs
+    # -------------------------------------------------------------------------
+    - |
+      {
+          echo "SEMVER_RELEASE_BRANCH=$(echo "${__json_output}" | jq -r '.branch')"
+          echo "SEMVER_RELEASE_MARKER_TAG=$(echo "${__json_output}" | jq -r '.tag')"
+      } >>"semver.env"
+
+  artifacts:
+    reports:
+      dotenv: semver.env
